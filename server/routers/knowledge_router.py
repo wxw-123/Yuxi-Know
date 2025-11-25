@@ -6,12 +6,10 @@ import textwrap
 from collections.abc import Mapping
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.responses import FileResponse as StarletteFileResponse
 
-from src.storage.db.models import User
-from server.utils.auth_middleware import get_admin_user
 from server.services.tasker import TaskContext, tasker
 from src import config, knowledge_base
 from src.knowledge.indexing import SUPPORTED_FILE_EXTENSIONS, is_supported_file_extension, process_file_to_markdown
@@ -27,7 +25,7 @@ knowledge = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 
 @knowledge.get("/databases")
-async def get_databases(current_user: User = Depends(get_admin_user)):
+async def get_databases():
     """获取所有知识库"""
     try:
         database = knowledge_base.get_databases()
@@ -45,7 +43,6 @@ async def create_database(
     kb_type: str = Body("lightrag"),
     additional_params: dict = Body({}),
     llm_info: dict = Body(None),
-    current_user: User = Depends(get_admin_user),
 ):
     """创建知识库"""
     logger.debug(
@@ -103,15 +100,14 @@ async def create_database(
 
         normalize_reranker_config(kb_type, additional_params)
 
+        allowed_kb_types = {"chroma", "milvus"}
+        if kb_type not in allowed_kb_types:
+            raise HTTPException(status_code=400, detail=f"仅支持以下知识库类型: {', '.join(sorted(allowed_kb_types))}")
+
         embed_info = config.embed_model_names[embed_model_name]
         database_info = await knowledge_base.create_database(
             database_name, description, kb_type=kb_type, embed_info=embed_info, llm_info=llm_info, **additional_params
         )
-
-        # 需要重新加载所有智能体，因为工具刷新了
-        from src.agents import agent_manager
-
-        await agent_manager.reload_all()
 
         return database_info
     except Exception as e:
@@ -120,7 +116,7 @@ async def create_database(
 
 
 @knowledge.get("/databases/{db_id}")
-async def get_database_info(db_id: str, current_user: User = Depends(get_admin_user)):
+async def get_database_info(db_id: str):
     """获取知识库详细信息"""
     database = knowledge_base.get_database_info(db_id)
     if database is None:
@@ -134,7 +130,6 @@ async def update_database_info(
     name: str = Body(...),
     description: str = Body(...),
     llm_info: dict = Body(None),
-    current_user: User = Depends(get_admin_user),
 ):
     """更新知识库信息"""
     logger.debug(f"Update database {db_id} info: {name}, {description}, llm_info: {llm_info}")
@@ -147,16 +142,11 @@ async def update_database_info(
 
 
 @knowledge.delete("/databases/{db_id}")
-async def delete_database(db_id: str, current_user: User = Depends(get_admin_user)):
+async def delete_database(db_id: str):
     """删除知识库"""
     logger.debug(f"Delete database {db_id}")
     try:
         await knowledge_base.delete_database(db_id)
-
-        # 需要重新加载所有智能体，因为工具刷新了
-        from src.agents import agent_manager
-
-        await agent_manager.reload_all()
 
         return {"message": "删除成功"}
     except Exception as e:
@@ -169,7 +159,6 @@ async def export_database(
     db_id: str,
     format: str = Query("csv", enum=["csv", "xlsx", "md", "txt"]),
     include_vectors: bool = Query(False, description="是否在导出中包含向量数据"),
-    current_user: User = Depends(get_admin_user),
 ):
     """导出知识库数据"""
     logger.debug(f"Exporting database {db_id} with format {format}")
@@ -202,9 +191,7 @@ async def export_database(
 
 
 @knowledge.post("/databases/{db_id}/documents")
-async def add_documents(
-    db_id: str, items: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_admin_user)
-):
+async def add_documents(db_id: str, items: list[str] = Body(...), params: dict = Body(...)):
     """添加文档到知识库"""
     logger.debug(f"Add documents for db_id {db_id}: {items} {params=}")
 
@@ -311,7 +298,7 @@ async def add_documents(
 
 
 @knowledge.get("/databases/{db_id}/documents/{doc_id}")
-async def get_document_info(db_id: str, doc_id: str, current_user: User = Depends(get_admin_user)):
+async def get_document_info(db_id: str, doc_id: str):
     """获取文档详细信息（包含基本信息和内容信息）"""
     logger.debug(f"GET document {doc_id} info in {db_id}")
 
@@ -324,7 +311,7 @@ async def get_document_info(db_id: str, doc_id: str, current_user: User = Depend
 
 
 @knowledge.get("/databases/{db_id}/documents/{doc_id}/basic")
-async def get_document_basic_info(db_id: str, doc_id: str, current_user: User = Depends(get_admin_user)):
+async def get_document_basic_info(db_id: str, doc_id: str):
     """获取文档基本信息（仅元数据）"""
     logger.debug(f"GET document {doc_id} basic info in {db_id}")
 
@@ -337,7 +324,7 @@ async def get_document_basic_info(db_id: str, doc_id: str, current_user: User = 
 
 
 @knowledge.get("/databases/{db_id}/documents/{doc_id}/content")
-async def get_document_content(db_id: str, doc_id: str, current_user: User = Depends(get_admin_user)):
+async def get_document_content(db_id: str, doc_id: str):
     """获取文档内容信息（chunks和lines）"""
     logger.debug(f"GET document {doc_id} content in {db_id}")
 
@@ -350,7 +337,7 @@ async def get_document_content(db_id: str, doc_id: str, current_user: User = Dep
 
 
 @knowledge.delete("/databases/{db_id}/documents/{doc_id}")
-async def delete_document(db_id: str, doc_id: str, current_user: User = Depends(get_admin_user)):
+async def delete_document(db_id: str, doc_id: str):
     """删除文档"""
     logger.debug(f"DELETE document {doc_id} info in {db_id}")
     try:
@@ -362,9 +349,7 @@ async def delete_document(db_id: str, doc_id: str, current_user: User = Depends(
 
 
 @knowledge.post("/databases/{db_id}/documents/rechunks")
-async def rechunks_documents(
-    db_id: str, file_ids: list[str] = Body(...), params: dict = Body(...), current_user: User = Depends(get_admin_user)
-):
+async def rechunks_documents(db_id: str, file_ids: list[str] = Body(...), params: dict = Body(...)):
     """重新分块文档"""
     logger.debug(f"Rechunks documents for db_id {db_id}: {file_ids} {params=}")
 
@@ -468,7 +453,7 @@ async def rechunks_documents(
 
 
 @knowledge.get("/databases/{db_id}/documents/{doc_id}/download")
-async def download_document(db_id: str, doc_id: str, request: Request, current_user: User = Depends(get_admin_user)):
+async def download_document(db_id: str, doc_id: str, request: Request):
     """下载原始文件"""
     logger.debug(f"Download document {doc_id} from {db_id}")
     try:
@@ -571,9 +556,7 @@ async def download_document(db_id: str, doc_id: str, request: Request, current_u
 
 
 @knowledge.post("/databases/{db_id}/query")
-async def query_knowledge_base(
-    db_id: str, query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_admin_user)
-):
+async def query_knowledge_base(db_id: str, query: str = Body(...), meta: dict = Body(...)):
     """查询知识库"""
     logger.debug(f"Query knowledge base {db_id}: {query}")
     try:
@@ -585,9 +568,7 @@ async def query_knowledge_base(
 
 
 @knowledge.post("/databases/{db_id}/query-test")
-async def query_test(
-    db_id: str, query: str = Body(...), meta: dict = Body(...), current_user: User = Depends(get_admin_user)
-):
+async def query_test(db_id: str, query: str = Body(...), meta: dict = Body(...)):
     """测试查询知识库"""
     logger.debug(f"Query test in {db_id}: {query}")
     try:
@@ -599,7 +580,7 @@ async def query_test(
 
 
 @knowledge.get("/databases/{db_id}/query-params")
-async def get_knowledge_base_query_params(db_id: str, current_user: User = Depends(get_admin_user)):
+async def get_knowledge_base_query_params(db_id: str):
     """获取知识库类型特定的查询参数"""
     try:
         # 获取数据库信息
@@ -607,145 +588,45 @@ async def get_knowledge_base_query_params(db_id: str, current_user: User = Depen
         if not db_info:
             raise HTTPException(status_code=404, detail="Database not found")
 
-        kb_type = db_info.get("kb_type", "lightrag")
+        kb_type = db_info.get("kb_type", "")
+        allowed_kb_types = {"chroma", "milvus"}
+        if kb_type not in allowed_kb_types:
+            raise HTTPException(status_code=400, detail="当前仅支持 Chroma 与 Milvus 知识库查询")
+
         metadata = db_info.get("metadata", {}) or {}
         reranker_config = metadata.get("reranker_config", {}) or {}
         reranker_enabled = bool(reranker_config.get("enabled", False))
 
-        # 根据知识库类型返回不同的查询参数
-        if kb_type == "lightrag":
-            params = {
-                "type": "lightrag",
-                "options": [
-                    {
-                        "key": "mode",
-                        "label": "检索模式",
-                        "type": "select",
-                        "default": "mix",
-                        "options": [
-                            {"value": "local", "label": "Local", "description": "上下文相关信息"},
-                            {"value": "global", "label": "Global", "description": "全局知识"},
-                            {"value": "hybrid", "label": "Hybrid", "description": "本地和全局混合"},
-                            {"value": "naive", "label": "Naive", "description": "基本搜索"},
-                            {"value": "mix", "label": "Mix", "description": "知识图谱和向量检索混合"},
-                        ],
-                    },
-                    {
-                        "key": "only_need_context",
-                        "label": "只使用上下文",
-                        "type": "boolean",
-                        "default": True,
-                        "description": "只返回上下文，不生成回答",
-                    },
-                    {
-                        "key": "only_need_prompt",
-                        "label": "只使用提示",
-                        "type": "boolean",
-                        "default": False,
-                        "description": "只返回提示，不进行检索",
-                    },
-                    {
-                        "key": "top_k",
-                        "label": "TopK",
-                        "type": "number",
-                        "default": 10,
-                        "min": 1,
-                        "max": 100,
-                        "description": "返回的最大结果数量",
-                    },
-                ],
-            }
-        elif kb_type == "chroma":
-            top_k_default = reranker_config.get("final_top_k", 10)
-            params_list = [
-                {
-                    "key": "top_k",
-                    "label": "TopK",
-                    "type": "number",
-                    "default": top_k_default,
-                    "min": 1,
-                    "max": 100,
-                    "description": "返回的最大结果数量",
-                },
-                {
-                    "key": "similarity_threshold",
-                    "label": "相似度阈值",
-                    "type": "number",
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.1,
-                    "description": "过滤相似度低于此值的结果",
-                },
-                {
-                    "key": "include_distances",
-                    "label": "显示相似度",
-                    "type": "boolean",
-                    "default": True,
-                    "description": "在结果中显示相似度分数",
-                },
-                {
-                    "key": "use_reranker",
-                    "label": "启用重排序",
-                    "type": "boolean",
-                    "default": reranker_enabled,
-                    "description": "是否使用精排模型对检索结果进行重排序",
-                },
-                {
-                    "key": "recall_top_k",
-                    "label": "召回数量",
-                    "type": "number",
-                    "default": reranker_config.get("recall_top_k", 50),
-                    "min": 10,
-                    "max": 200,
-                    "description": "启用重排序时向量检索的候选数量",
-                },
-            ]
+        options = [
+            {
+                "key": "top_k",
+                "label": "TopK",
+                "type": "number",
+                "default": reranker_config.get("final_top_k", 20),
+                "min": 1,
+                "max": 200,
+                "description": "返回的最大结果数量",
+            },
+            {
+                "key": "score_threshold",
+                "label": "分数阈值",
+                "type": "number",
+                "default": 0.5,
+                "min": 0.0,
+                "max": 1.0,
+                "description": "过滤低于此分数的结果",
+            },
+            {
+                "key": "include_distances",
+                "label": "显示相似度",
+                "type": "boolean",
+                "default": True,
+                "description": "在结果中显示相似度分数",
+            },
+        ]
 
-            if config.reranker_names:
-                params_list.append(
-                    {
-                        "key": "reranker_model",
-                        "label": "重排序模型",
-                        "type": "select",
-                        "default": reranker_config.get("model", ""),
-                        "options": [
-                            {"label": info.name, "value": model_id} for model_id, info in config.reranker_names.items()
-                        ],
-                        "description": "覆盖默认配置，选择用于本次查询的重排序模型",
-                    }
-                )
-
-            params = {"type": "chroma", "options": params_list}
-        elif kb_type == "milvus":
-            top_k_default = reranker_config.get("final_top_k", 10)
-            params_list = [
-                {
-                    "key": "top_k",
-                    "label": "TopK",
-                    "type": "number",
-                    "default": top_k_default,
-                    "min": 1,
-                    "max": 100,
-                    "description": "返回的最大结果数量",
-                },
-                {
-                    "key": "similarity_threshold",
-                    "label": "相似度阈值",
-                    "type": "number",
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.1,
-                    "description": "过滤相似度低于此值的结果",
-                },
-                {
-                    "key": "include_distances",
-                    "label": "显示相似度",
-                    "type": "boolean",
-                    "default": True,
-                    "description": "在结果中显示相似度分数",
-                },
+        if kb_type == "milvus":
+            options.append(
                 {
                     "key": "metric_type",
                     "label": "距离度量类型",
@@ -757,27 +638,33 @@ async def get_knowledge_base_query_params(db_id: str, current_user: User = Depen
                         {"value": "IP", "label": "内积", "description": "适合标准化向量"},
                     ],
                     "description": "向量相似度计算方法",
-                },
-                {
-                    "key": "use_reranker",
-                    "label": "启用重排序",
-                    "type": "boolean",
-                    "default": reranker_enabled,
-                    "description": "是否使用精排模型对检索结果进行重排序",
-                },
-                {
-                    "key": "recall_top_k",
-                    "label": "召回数量",
-                    "type": "number",
-                    "default": reranker_config.get("recall_top_k", 50),
-                    "min": 10,
-                    "max": 200,
-                    "description": "启用重排序时向量检索的候选数量",
-                },
-            ]
+                }
+            )
+
+        if reranker_config:
+            options.extend(
+                [
+                    {
+                        "key": "use_reranker",
+                        "label": "启用重排序",
+                        "type": "boolean",
+                        "default": reranker_enabled,
+                        "description": "是否使用精排模型对检索结果进行重排序",
+                    },
+                    {
+                        "key": "recall_top_k",
+                        "label": "召回数量",
+                        "type": "number",
+                        "default": reranker_config.get("recall_top_k", 50),
+                        "min": 10,
+                        "max": 200,
+                        "description": "启用重排序时向量检索的候选数量",
+                    },
+                ]
+            )
 
             if config.reranker_names:
-                params_list.append(
+                options.append(
                     {
                         "key": "reranker_model",
                         "label": "重排序模型",
@@ -790,66 +677,15 @@ async def get_knowledge_base_query_params(db_id: str, current_user: User = Depen
                     }
                 )
 
-            params = {"type": "milvus", "options": params_list}
-        else:
-            # 未知类型，返回基本参数
-            params = {
-                "type": "unknown",
-                "options": [
-                    {
-                        "key": "top_k",
-                        "label": "TopK",
-                        "type": "number",
-                        "default": 10,
-                        "min": 1,
-                        "max": 100,
-                        "description": "返回的最大结果数量",
-                    }
-                ],
-            }
-
-        return {"params": params, "message": "success"}
-
+        return {"type": kb_type, "options": options}
     except Exception as e:
-        logger.error(f"获取知识库查询参数失败 {e}, {traceback.format_exc()}")
-        return {"message": f"获取知识库查询参数失败 {e}", "params": {}}
-
-
-# =============================================================================
-# === AI生成示例问题 ===
-# =============================================================================
-
-
-SAMPLE_QUESTIONS_SYSTEM_PROMPT = """你是一个专业的知识库问答测试专家。
-
-你的任务是根据知识库中的文件列表，生成有价值的测试问题。
-
-要求：
-1. 问题要具体、有针对性，基于文件名称和类型推测可能的内容
-2. 问题要涵盖不同方面和难度
-3. 问题要简洁明了，适合用于检索测试
-4. 问题要多样化，包括事实查询、概念解释、操作指导等
-5. 问题长度控制在10-30字之间
-6. 直接返回JSON数组格式，不要其他说明
-
-返回格式：
-```json
-{
-  "questions": [
-    "问题1？",
-    "问题2？",
-    "问题3？"
-  ]
-}
-```
-"""
-
+        logger.error(f"获取知识库查询参数失败: {e}, {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"获取查询参数失败: {e}")
 
 @knowledge.post("/databases/{db_id}/sample-questions")
 async def generate_sample_questions(
     db_id: str,
     request_body: dict = Body(...),
-    current_user: User = Depends(get_admin_user),
 ):
     """
     AI生成针对知识库的测试问题
@@ -973,7 +809,7 @@ async def generate_sample_questions(
 
 
 @knowledge.get("/databases/{db_id}/sample-questions")
-async def get_sample_questions(db_id: str, current_user: User = Depends(get_admin_user)):
+async def get_sample_questions(db_id: str):
     """
     获取知识库的测试问题
 
@@ -1018,7 +854,6 @@ async def upload_file(
     file: UploadFile = File(...),
     db_id: str | None = Query(None),
     allow_jsonl: bool = Query(False),
-    current_user: User = Depends(get_admin_user),
 ):
     """上传文件"""
     if not file.filename:
@@ -1073,13 +908,13 @@ async def upload_file(
 
 
 @knowledge.get("/files/supported-types")
-async def get_supported_file_types(current_user: User = Depends(get_admin_user)):
+async def get_supported_file_types():
     """获取当前支持的文件类型"""
     return {"message": "success", "file_types": sorted(SUPPORTED_FILE_EXTENSIONS)}
 
 
 @knowledge.post("/files/markdown")
-async def mark_it_down(file: UploadFile = File(...), current_user: User = Depends(get_admin_user)):
+async def mark_it_down(file: UploadFile = File(...)):
     """调用 src.knowledge.indexing 下面的 process_file_to_markdown 解析为 markdown，参数是文件，需要管理员权限"""
     try:
         content = await file.read()
@@ -1096,10 +931,11 @@ async def mark_it_down(file: UploadFile = File(...), current_user: User = Depend
 
 
 @knowledge.get("/types")
-async def get_knowledge_base_types(current_user: User = Depends(get_admin_user)):
+async def get_knowledge_base_types():
     """获取支持的知识库类型"""
     try:
-        kb_types = knowledge_base.get_supported_kb_types()
+        allowed = {"chroma", "milvus"}
+        kb_types = [kb for kb in knowledge_base.get_supported_kb_types() if kb in allowed]
         return {"kb_types": kb_types, "message": "success"}
     except Exception as e:
         logger.error(f"获取知识库类型失败 {e}, {traceback.format_exc()}")
@@ -1107,7 +943,7 @@ async def get_knowledge_base_types(current_user: User = Depends(get_admin_user))
 
 
 @knowledge.get("/stats")
-async def get_knowledge_base_statistics(current_user: User = Depends(get_admin_user)):
+async def get_knowledge_base_statistics():
     """获取知识库统计信息"""
     try:
         stats = knowledge_base.get_statistics()
@@ -1123,7 +959,7 @@ async def get_knowledge_base_statistics(current_user: User = Depends(get_admin_u
 
 
 @knowledge.get("/embedding-models/{model_id}/status")
-async def get_embedding_model_status(model_id: str, current_user: User = Depends(get_admin_user)):
+async def get_embedding_model_status(model_id: str):
     """获取指定embedding模型的状态"""
     logger.debug(f"Checking embedding model status: {model_id}")
     try:
@@ -1138,7 +974,7 @@ async def get_embedding_model_status(model_id: str, current_user: User = Depends
 
 
 @knowledge.get("/embedding-models/status")
-async def get_all_embedding_models_status(current_user: User = Depends(get_admin_user)):
+async def get_all_embedding_models_status():
     """获取所有embedding模型的状态"""
     logger.debug("Checking all embedding models status")
     try:
